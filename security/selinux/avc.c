@@ -732,9 +732,53 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 {
 	struct common_audit_data *ad = a;
 	audit_log_format(ab, " ");
-	avc_dump_query(ab, ad->selinux_audit_data.ssid,
-			   ad->selinux_audit_data.tsid,
-			   ad->selinux_audit_data.tclass);
+	avc_dump_query(ab, ad->selinux_audit_data->slad->ssid,
+			   ad->selinux_audit_data->slad->tsid,
+			   ad->selinux_audit_data->slad->tclass);
+	if (ad->selinux_audit_data->slad->denied) {
+		audit_log_format(ab, " permissive=%u",
+				 ad->selinux_audit_data->slad->result ? 0 : 1);
+	}
+}
+
+/* This is the slow part of avc audit with big stack footprint */
+static noinline int slow_avc_audit(u32 ssid, u32 tsid, u16 tclass,
+		u32 requested, u32 audited, u32 denied, int result,
+		struct common_audit_data *a,
+		unsigned flags)
+{
+	struct common_audit_data stack_data;
+	struct selinux_audit_data sad = {0,};
+	struct selinux_late_audit_data slad;
+
+	if (!a) {
+		a = &stack_data;
+		COMMON_AUDIT_DATA_INIT(a, NONE);
+		a->selinux_audit_data = &sad;
+	}
+
+	/*
+	 * When in a RCU walk do the audit on the RCU retry.  This is because
+	 * the collection of the dname in an inode audit message is not RCU
+	 * safe.  Note this may drop some audits when the situation changes
+	 * during retry. However this is logically just as if the operation
+	 * happened a little later.
+	 */
+	if ((a->type == LSM_AUDIT_DATA_INODE) &&
+	    (flags & MAY_NOT_BLOCK))
+		return -ECHILD;
+
+	slad.tclass = tclass;
+	slad.requested = requested;
+	slad.ssid = ssid;
+	slad.tsid = tsid;
+	slad.audited = audited;
+	slad.denied = denied;
+	slad.result = result;
+
+	a->selinux_audit_data->slad = &slad;
+	common_lsm_audit(a, avc_audit_pre_callback, avc_audit_post_callback);
+	return 0;
 }
 
 static inline int avc_operation_audit(u32 ssid, u32 tsid, u16 tclass,
@@ -809,6 +853,7 @@ int avc_audit(u32 ssid, u32 tsid,
 	if (!audited)
 		return 0;
 
+<<<<<<< HEAD
 	if (!a) {
 		a = &stack_data;
 		COMMON_AUDIT_DATA_INIT(a, NONE);
@@ -835,6 +880,11 @@ int avc_audit(u32 ssid, u32 tsid,
 	a->lsm_post_audit = avc_audit_post_callback;
 	common_lsm_audit(a);
 	return 0;
+=======
+	return slow_avc_audit(ssid, tsid, tclass,
+		requested, audited, denied, result,
+		a, flags);
+>>>>>>> 46413cc... selinux: Report permissive mode in avc: denied messages.
 }
 
 /**
